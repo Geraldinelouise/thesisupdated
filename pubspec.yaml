@@ -48,6 +48,8 @@ dependencies:
   telephony: ^0.2.0
   intl: ^0.20.2
   url_launcher: ^6.3.2
+  fl_chart: ^0.66.1
+
   
 
 dev_dependencies:

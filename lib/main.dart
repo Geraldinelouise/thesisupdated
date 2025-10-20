@@ -1,10 +1,12 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:android_intent_plus/flag.dart';
-
+import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
 import 'splash_screen.dart';
-import 'conditions.dart'; // ConditionScreen
-import 'history.dart'; // HistoryScreen
+import 'conditions.dart';
+import 'history.dart';
 
 void main() {
   runApp(MaterialApp(debugShowCheckedModeBanner: false, home: SplashScreen()));
@@ -45,18 +47,17 @@ class _MainScreenState extends State<MainScreen> {
     super.initState();
     _screens = [
       HomeScreen(),
-      Container(), // Purifier placeholder (intent handled separately)
+      Container(),
       ConditionScreen(
         onSensorDataChanged: (co2Value, nh3Value) {
           co2 = co2Value;
           nh3 = nh3Value;
         },
       ),
-      HistoryScreen(), // History tab
+      HistoryScreen(),
     ];
   }
 
-  // Open Mi Home app
   void _openMiHomeApp() async {
     const packageName = 'com.xiaomi.smarthome';
     final intent = AndroidIntent(
@@ -81,7 +82,7 @@ class _MainScreenState extends State<MainScreen> {
         currentIndex: _currentIndex,
         onTap: (index) {
           if (index == 1) {
-            _openMiHomeApp(); // Open Mi Home app
+            _openMiHomeApp();
             return;
           }
           setState(() => _currentIndex = index);
@@ -103,15 +104,22 @@ class _MainScreenState extends State<MainScreen> {
 }
 
 // ============================
-// HomeScreen (Recommendations)
+// HomeScreen (Statistics + Recommendations)
 // ============================
 class HomeScreen extends StatefulWidget {
   @override
-  _HomeScreenState createState() => _HomeScreenState();
+  HomeScreenState createState() => HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  String? selectedRecommendation;
+class HomeScreenState extends State<HomeScreen> {
+  String? selectedOption;
+  final ValueNotifier<List<SensorReading>> _readingsNotifier = ValueNotifier(
+    [],
+  );
+  bool _isLoading = false;
+  String _selectedGasView = "Both";
+  Timer? _refreshTimer;
+  DateTime _lastUpdated = DateTime.now();
 
   final List<GasRecommendation> recommendations = [
     GasRecommendation(
@@ -168,10 +176,44 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _loadReadings();
+
+    // 🔁 Auto-refresh every 10 seconds
+    _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
+      await _loadReadings();
+    });
+  }
+
+  Future<void> _loadReadings() async {
+    _isLoading = true;
+    final data = await DatabaseHelper().getAllReadings();
+
+    // Map DB rows to SensorReading objects
+    final all = data.map((json) => SensorReading.fromJson(json)).toList();
+
+    // Take first 10 readings (oldest)
+    final first10 = (all.length <= 10) ? all : all.sublist(0, 10);
+
+    // Reverse for display: 10th reading at 1, 1st at 10
+    _readingsNotifier.value = first10.reversed.toList();
+
+    _lastUpdated = DateTime.now();
+    _isLoading = false;
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _readingsNotifier.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // Background
         Column(
           children: [
             ClipRect(
@@ -194,8 +236,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
-
-        // Foreground content
         SafeArea(
           child: Column(
             children: [
@@ -204,10 +244,22 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: SingleChildScrollView(
                   child: Column(
                     children: [
-                      _buildRecommendationsDropdown(),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 10,
+                        ),
+                        child: ValueListenableBuilder<List<SensorReading>>(
+                          valueListenable: _readingsNotifier,
+                          builder: (context, readings, _) {
+                            return _buildStatisticsSection(readings);
+                          },
+                        ),
+                      ),
                       const SizedBox(height: 20),
-                      if (selectedRecommendation != null)
-                        _buildRecommendationDetails(),
+                      _buildDropdown(),
+                      const SizedBox(height: 20),
+                      if (selectedOption != null) _buildRecommendationDetails(),
                       const SizedBox(height: 80),
                     ],
                   ),
@@ -220,16 +272,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildRecommendationsDropdown() {
+  Widget _buildDropdown() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       margin: const EdgeInsets.symmetric(horizontal: 20),
       decoration: _boxDecoration(const Color(0xFF0BBEDE)),
       child: DropdownButton<String>(
-        value: selectedRecommendation,
+        value: selectedOption,
         isExpanded: true,
         hint: const Text(
-          "Recommendations",
+          "Select Recommendation",
           style: TextStyle(color: Color(0xFF0BBEDE), fontSize: 18),
         ),
         icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF0BBEDE)),
@@ -243,20 +295,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 )
                 .toList(),
-        onChanged: (value) {
-          setState(() {
-            selectedRecommendation = value;
-          });
-        },
+        onChanged: (value) => setState(() => selectedOption = value),
       ),
     );
   }
 
   Widget _buildRecommendationDetails() {
     final selected = recommendations.firstWhere(
-      (rec) => rec.title == selectedRecommendation,
+      (rec) => rec.title == selectedOption,
     );
-
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 30),
       padding: const EdgeInsets.all(16),
@@ -272,6 +319,156 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 )
                 .toList(),
+      ),
+    );
+  }
+
+  Widget _buildStatisticsSection(List<SensorReading> readings) {
+    if (_isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFF0BBEDE)),
+      );
+    }
+
+    if (readings.isEmpty) {
+      return const Text("No historical data found.");
+    }
+
+    final co2Values = readings.map((r) => r.co2.toDouble()).toList();
+    final nh3Values = readings.map((r) => r.ammonia.toDouble()).toList();
+
+    final maxCo2 =
+        co2Values.isEmpty ? 0 : co2Values.reduce((a, b) => a > b ? a : b);
+    final maxNh3 =
+        nh3Values.isEmpty ? 0 : nh3Values.reduce((a, b) => a > b ? a : b);
+
+    double maxY;
+    if (_selectedGasView == "NH3") {
+      maxY = maxNh3 + 5;
+    } else if (_selectedGasView == "CO2") {
+      maxY = maxCo2 + 200;
+    } else {
+      maxY = (maxCo2 > maxNh3 ? maxCo2 + 200 : maxNh3 + 5);
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: _boxDecoration(const Color(0xFF0BBEDE)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "📈 Recent Readings (CO₂ & NH₃)",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ChoiceChip(
+                label: const Text("CO₂ Only"),
+                selected: _selectedGasView == "CO2",
+                onSelected: (_) => setState(() => _selectedGasView = "CO2"),
+                selectedColor: Colors.blue.shade100,
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text("NH₃ Only"),
+                selected: _selectedGasView == "NH3",
+                onSelected: (_) => setState(() => _selectedGasView = "NH3"),
+                selectedColor: Colors.green.shade100,
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text("Both"),
+                selected: _selectedGasView == "Both",
+                onSelected: (_) => setState(() => _selectedGasView = "Both"),
+                selectedColor: Colors.cyan.shade100,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 250,
+            child: LineChart(
+              LineChartData(
+                minY: 0,
+                maxY: maxY,
+                titlesData: FlTitlesData(
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: 1,
+                      getTitlesWidget: (value, meta) {
+                        int idx = value.toInt();
+                        if (idx >= 0 && idx < readings.length) {
+                          // Reverse X-axis labels
+                          int label = readings.length - idx;
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              label.toString(),
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          );
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    ),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: maxY / 5,
+                      reservedSize: 40,
+                      getTitlesWidget:
+                          (value, meta) => Text(
+                            value.toInt().toString(),
+                            style: const TextStyle(fontSize: 10),
+                          ),
+                    ),
+                  ),
+                ),
+                gridData: FlGridData(
+                  show: true,
+                  horizontalInterval: maxY / 5,
+                  drawVerticalLine: false,
+                ),
+                borderData: FlBorderData(show: true),
+                lineBarsData: [
+                  if (_selectedGasView == "CO2" || _selectedGasView == "Both")
+                    LineChartBarData(
+                      isCurved: true,
+                      color: Colors.blue,
+                      barWidth: 2,
+                      dotData: FlDotData(show: false),
+                      spots: List.generate(
+                        co2Values.length,
+                        (i) =>
+                            FlSpot((i + 1).toDouble(), co2Values[i].toDouble()),
+                      ),
+                    ),
+                  if (_selectedGasView == "NH3" || _selectedGasView == "Both")
+                    LineChartBarData(
+                      isCurved: true,
+                      color: Colors.green,
+                      barWidth: 2,
+                      dotData: FlDotData(show: false),
+                      spots: List.generate(
+                        nh3Values.length,
+                        (i) => FlSpot((i + 1).toDouble(), nh3Values[i] * 1.05),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            "Last updated: ${DateFormat('yyyy-MM-dd HH:mm:ss').format(_lastUpdated)}",
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ],
       ),
     );
   }
